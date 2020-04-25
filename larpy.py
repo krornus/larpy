@@ -142,7 +142,7 @@ class GrammarTable:
         for child in sym.children:
             for x in child:
                 if self.sym(x.id) == None:
-                    self._add_rules(x)
+                    self._add_rule(x)
             self._lookup[sym.id].append(len(self._rules))
             self._rules.append(Rule(sym.id, tuple(x.id for x in child)))
         self._nonterminals.append(sym.id)
@@ -159,8 +159,24 @@ class GrammarTable:
     def is_term(self, id):
         return self._symbols[id].is_terminal()
 
+    def is_eps(self, id):
+        return self.is_singleton(id) and self._symbols[id] == Production.Epsilon
+
+    def is_singleton(self, id):
+        return self.len(id) == 1
+
+    def len(self, id):
+        r = self.rule(id)
+        if r:
+            return len(r.rhs)
+
+    def startswith(self, id):
+
     def rule(self, id):
         return self._rules[id]
+
+    def rules_of(self, id):
+        return self._lookup[id]
 
     def lookahead(self, item):
         rule = self._rules[item.rule]
@@ -174,60 +190,25 @@ class Parser:
         goal = Production("Goal")
         goal.rules([[prod]])
 
-        self._add_rules(goal)
-        self._goal = self._lookup[goal.id][0]
+        self._tab = GrammarTable(goal)
 
     def itemstr(self, i):
-        rule = self._rules[i.rule]
-        lhs = self._symbols[rule.lhs].name
-        rhs = [self._symbols[x].name for x in rule.rhs]
+        lhs = self._tab.name(rule.lhs)
+        rhs = [self._tab.name[x] for x in rule.rhs]
         lrhs = " ".join(x for x in rhs[:i.cursor])
         rrhs = " ".join(x for x in rhs[i.cursor:])
         return f"{lhs} -> {lrhs} . {rrhs}"
 
-    def _sym_rules(self, id):
-        try:
-            for x in self._lookup[id]:
-                yield self._rules[x]
-        except KeyError:
-            pass
-
-    def rules(self, id=None, filt=None):
-        if id:
-            if filt:
-                for x in self._sym_rules(id):
-                    if filt(x):
-                        yield x
-            else:
-                for x in self._sym_rules(id):
-                    yield x
-        else:
-            try:
-                if filt:
-                    for x in self._rules:
-                        if filt(x):
-                            yield x
-                else:
-                    for x in self._rules:
-                        yield x
-            except KeyError:
-                pass
-
     def _partial(self, first, prod):
         # add all non terminals
-        for r in self.rules(id=prod):
-            sym = self._symbols[r.rhs[0]]
-
-            eps = len(r) == 1 and sym == Production.Epsilon
-            term = sym.is_terminal() and sym != Production.Epsilon
-
-            if eps or term:
+        for r in self._tab.rules_of(prod):
+            a = self._tab.is_eps(prod)
+            b = self._tab.is_term(prod) and self._tab.sym(prod) != Production.Epsilon
+            if a or b:
                 first[prod].add(r.rhs[0])
 
-        for r in self.rules(id=prod):
-            sym = self._symbols[r.rhs[0]]
-
-            if sym.is_variable() and r.rhs[0] != prod:
+        for r in self._tab.rules_of(prod):
+            if self._tab.is_var(r) and r.rhs[0] != prod:
                 pf = first[r.rhs[0]]
                 if Production.Epsilon not in pf:
                     first[prod] |= pf
@@ -240,7 +221,7 @@ class Parser:
     def first(self):
         if self._first == None:
             first = First()
-            q = deque(self._nonterminals)
+            q = deque(self._tab._nonterminals)
             while q:
                 prod = q.popleft()
                 lstart = len(first)

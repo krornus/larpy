@@ -1,289 +1,352 @@
 import re
-import copy
 from collections import deque, namedtuple
 
-ID = 0
-def nextid():
-    global ID
-    rv = ID
-    ID += 1
-    return rv
+class intset(list):
+    def __init__(self, len):
+        super(intset, self).__init__((False for _ in range(len)))
+        self._len = 0
+        self._cap = len
 
-class Symbol:
-    def __init__(self, name):
-        self.id = nextid()
-        self.name = name
-
-    def is_terminal(self):
-        raise NotImplementedError
-
-    def is_variable(self):
-        return not self.is_terminal()
-
-    def __hash__(self):
-        return int(self.id)
-
-    def __eq__(self, other):
-        if isinstance(other, Symbol):
-            return self.id == other.id
-        elif isinstance(other, int):
-            return self.id == other
+    def __contains__(self, x):
+        if x >= 0 and x < self._cap:
+            return self[x]
         else:
             return False
 
-    def __str__(self):
-        return self.name
+    def add(self, x):
+        if x not in self:
+            self._len += 1
+            self[x] = True
 
-    def __repr__(self):
-        return f"<{self.name}>"
-
-class MetaToken(type):
-    @property
-    def EPSILON(cls):
-        if not hasattr(cls, "_EPSILON"):
-            cls._EPSILON = cls("EPSILON", "")
-        return cls._EPSILON
-
-    @property
-    def END(cls):
-        if not hasattr(cls, "_END"):
-            cls._END = cls("$", "$")
-        return cls._END
-
-
-class Token(Symbol, metaclass=MetaToken):
-    def __init__(self, name, reg):
-        self.creg = re.compile(reg)
-        super(Token, self).__init__(name)
-
-    def is_terminal(self):
-        return True
-
-class MetaProduction(type):
-    @property
-    def Epsilon(cls):
-        if not hasattr(cls, "_Epsilon"):
-            cls._Epsilon = cls("Epsilon")
-            cls._Epsilon.rules([[Token.EPSILON]])
-        return cls._Epsilon
-
-class Production(Symbol, metaclass=MetaProduction):
-    def __init__(self, name):
-        super(Production, self).__init__(name)
-        self._roflag = False
-        self.children = None
-
-    def rules(self, rules):
-        if self._roflag:
-            raise ValueError("Production is read-only")
-        elif not len(rules) or not len(rules[0]):
-            raise ValueError("cannot have empty rules, use Production.Epsilon instead")
-        self.children = tuple((tuple(x) for x in rules))
-        self._roflag = True
+    def __iter__(self):
+        n = 0
+        for x in range(self._cap):
+            if n >= self._len:
+                break
+            if self[x]:
+                n += 1
+                yield x
 
     def __len__(self):
-        return len(self.children)
+        return self._len
 
-    def is_terminal(self):
-        return False
+    def __str__(self):
+        return repr(self)
 
-class First(dict):
-    def __getitem__(self, p):
+    def __repr__(self):
+        return f"{{{', '.join(str(x) for x in iter(self))}}}"
+
+class first(list):
+    def __init__(self, len):
+        super(first, self).__init__((None for x in range(len)))
+        self._len = 0
+        self._cap = len
+
+    def __contains__(self, x):
+        if x >= 0 and x < self._cap:
+            return super(first, self).__getitem__(x) is not None
+        else:
+            return False
+
+    def __setitem__(self, p, v):
         if p not in self:
-            super(First, self).__setitem__(p, set())
-        return super(First, self).__getitem__(p)
+            self._len += 1
+        return super(first, self).__setitem__(p, v)
 
-class reslist(list):
-    def __init__(self, *args, default=None, **kwargs):
-        self._default = default
-        super(reslist, self).__init__(*args, **kwargs)
+    def __getitem__(self, p):
+        if super(first, self).__getitem__(p) is None:
+            self[p] = intset(self._cap)
+        return super(first, self).__getitem__(p)
 
-    def reserve(self, idx):
-        if idx > len(self):
-            defaults = (copy.copy(self._default) for _ in range(idx - len(self)))
-            super(reslist, self).extend(defaults)
+class Grammar:
 
-    def __setitem__(self, idx, val):
-        if isinstance(idx, int):
-            self.reserve(idx + 1)
-        return super(reslist, self).__setitem__(idx, val)
+    Token = namedtuple('Token', 'name creg')
+    Production = namedtuple('Production',  'name')
+    Rule = namedtuple('Rule', 'lhs rhs')
+    Item = namedtuple('Item', 'rule cursor')
 
-    def __getitem__(self, idx):
-        if isinstance(idx, int):
-            self.reserve(idx + 1)
-        return super(reslist, self).__getitem__(idx)
-
-Rule = namedtuple('Rule', 'lhs rhs')
-Item = namedtuple('Item', 'rule cursor')
-
-class GrammarTable:
-    def __init__(self, goal):
-        self._lookup = reslist(default=list())
-        self._rules = reslist()
-        self._symbols = reslist()
-
-        self._terminals = list()
-        self._nonterminals = list()
-        self._add_rule(goal)
-
-    def _add_rule(self, sym):
-        if sym.is_terminal():
-            return self._add_terminal(sym)
-        elif sym.is_variable():
-            return self._add_nonterminal(sym)
-
-    def _add_terminal(self, sym):
-        self._lookup[sym.id] = None
-        self._symbols[sym.id] = sym
-        self._terminals.append(sym.id)
-
-    def _add_nonterminal(self, sym):
-        self._symbols[sym.id] = sym
-        for child in sym.children:
-            for x in child:
-                if self.sym(x.id) == None:
-                    self._add_rule(x)
-            self._lookup[sym.id].append(len(self._rules))
-            self._rules.append(Rule(sym.id, tuple(x.id for x in child)))
-        self._nonterminals.append(sym.id)
-
-    def sym(self, id):
-        return self._symbols[id]
-
-    def name(self, id):
-        return self.sym(id).name
-
-    def is_var(self, id):
-        return self._symbols[id].is_variable()
-
-    def is_term(self, id):
-        return self._symbols[id].is_terminal()
-
-    def is_eps(self, id):
-        return self.is_singleton(id) and self._symbols[id] == Production.Epsilon
-
-    def is_singleton(self, id):
-        return self.len(id) == 1
-
-    def len(self, id):
-        r = self.rule(id)
-        if r:
-            return len(r.rhs)
-
-    def startswith(self, id):
-
-    def rule(self, id):
-        return self._rules[id]
-
-    def rules_of(self, id):
-        return self._lookup[id]
-
-    def lookahead(self, item):
-        rule = self._rules[item.rule]
-        if item.cursor < len(rule.rhs):
-            return rule.rhs[item.cursor]
-
-class Parser:
-    def __init__(self, prod):
+    def __init__(self):
+        self._eps = 0
+        self._tokens = [True]
+        self._symbols = [self.Token("EPSILON","")]
+        self._rules = [None]
         self._first = None
 
-        goal = Production("Goal")
-        goal.rules([[prod]])
+    def add_tok(self, name, reg):
+        creg = re.compile(reg)
+        if creg.match(""):
+            raise ValueError("Token regex cannot match empty string")
 
-        self._tab = GrammarTable(goal)
+        tok = len(self._symbols)
+        self._rules.append(None)
+        self._tokens.append(True)
+        self._symbols.append(self.Token(name, creg))
+
+        # first set is now dirty
+        self._first = None
+
+        return tok
+
+    def add_prod(self, name):
+        if name in self._rules:
+            raise ValueError("Production already exists")
+
+        prod = len(self._symbols)
+        self._rules.append([])
+        self._tokens.append(False)
+        self._symbols.append(self.Production(name))
+
+        # first set is now dirty
+        self._first = None
+
+        return prod
+
+    def add_rule(self, lhs, rhs):
+        if not self.is_prod(lhs):
+            raise ValueError("Right-hand-side of rule is not a production")
+        self._rules[lhs].append(self.Rule(lhs, tuple(rhs)))
+
+        # first set is now dirty
+        self._first = None
+
+    def sym(self, x):
+        try:
+            return self._symbols[x]
+        except IndexError:
+            raise ValueError("Missing symbol")
+
+    def is_prod(self, s):
+        return s >= 0 and s < len(self._symbols) and not self._tokens[s]
+
+    def is_tok(self, s):
+        return s >= 0 and s < len(self._symbols) and self._tokens[s]
+
+    def productions(self):
+        return (x for x in range(len(self._symbols)) if self.is_prod(x))
+
+    def tokens(self):
+        return (x for x in range(len(self._symbols)) if self.is_tok(x))
+
+    def rules(self, p):
+        return self._rules[p]
+
+    def name(self, p):
+        return self.sym(p).name
+
+    @property
+    def epsilon(self):
+        return self._eps
 
     def itemstr(self, i):
-        lhs = self._tab.name(rule.lhs)
-        rhs = [self._tab.name[x] for x in rule.rhs]
+        lhs = self.name(i.rule.lhs)
+        rhs = [self.name(x) for x in i.rule.rhs]
         lrhs = " ".join(x for x in rhs[:i.cursor])
         rrhs = " ".join(x for x in rhs[i.cursor:])
         return f"{lhs} -> {lrhs} . {rrhs}"
 
-    def _partial(self, first, prod):
-        # add all non terminals
-        for r in self._tab.rules_of(prod):
-            a = self._tab.is_eps(prod)
-            b = self._tab.is_term(prod) and self._tab.sym(prod) != Production.Epsilon
+    def _partial_first(self, f, p):
+
+        # first deal with terminals
+        for r in self.rules(p):
+            # if the rule is of the form X: epsilon
+            a = len(r) == 1 and r[0] == self._eps
+            # if the rule is of the form X: t B where t is a token != epsilon
+            b = self.is_tok(r[0]) and r[0] != self._eps
             if a or b:
-                first[prod].add(r.rhs[0])
+                f[p].add(r[0])
 
-        for r in self._tab.rules_of(prod):
-            if self._tab.is_var(r) and r.rhs[0] != prod:
-                pf = first[r.rhs[0]]
-                if Production.Epsilon not in pf:
-                    first[prod] |= pf
-                else:
-                    sym2 = self._symbols[r.rhs[1]]
-                    first[prod] |= pf - {Production.epsilon}
-                    if len(r) > 1 and self._sym_rules(r.rhs[1]).is_variable():
-                        self._partial(first, r.rhs[1])
+        # now deal with productions
+        for r in self.rules(p):
+            if self.is_prod(r[0]) and r[0] != p:
+                # add all values from first(r[0])
+                # that arent epsilon
+                for s in f[r[0]]:
+                    if s != self._eps:
+                        f[p].add(s)
+            # if epsilon is in first(r[0]),
+            # we need to include the next
+            # production in line
+            if len(r) > 1 and self._eps in f[r[0]]:
+                self._partial_first(f, r[1])
 
-    def first(self):
-        if self._first == None:
-            first = First()
-            q = deque(self._tab._nonterminals)
+    def first(self, sym):
+        if self._first is None:
+            # only recalculate this if the grammar
+            # has changed since last calculation
+            self._first = first(len(self._symbols))
+
+            q = deque(self.productions())
             while q:
-                prod = q.popleft()
-                lstart = len(first)
-                self._partial(first, prod)
-                if lstart != len(first) or not len(first):
-                    q.append(prod)
-            self._first = dict(first)
-        return self._first
+                p = q.popleft()
+                fl = len(self._first[p])
+                self._partial_first(self._first, p)
+                if fl != len(self._first[p]) or not len(self._first[p]):
+                    q.append(p)
+
+        return iter(self._first[sym])
+
+    # get the symbol pointed to by
+    # the cursor associated with an item
+    # unless cursor is at the end of the item,
+    # in which case return None
+    def curs(self, i):
+        if i.cursor >= 0 and i.cursor < len(i.rule.rhs):
+            return i.rule.rhs[i.cursor]
+
+    def nonkernel(self, r):
+        return self.Item(r, cursor=0)
 
     def closure(self, items):
-        cl = set(items)
-        added = [False for _ in range(len(self._rules))]
-        done = False
+        # intset of items. each thing in this
+        # set represents the lhs of a production
+        # where each associated nonkernel item
+        # is in the closure
+        c = intset(len(self._symbols))
+        iset = set(items)
 
-        while not done:
-            add = set()
-            done = True
-            for i in cl:
-                ahd = self.lookahead(i)
-                print(ahd)
-                # if the item has a dot before a nonterminal
-                if ahd and self._symbols[ahd].is_variable():
-                    for p in self._lookup[ahd]:
-                        if not added[p]:
-                            added[p] = True
-                            add.add(Item(p, 0))
-                            done = False
-            cl |= add
-        return cl
+        # first add each symbol P s.t. A -> a.Px
+        # pointed to by each item i. P may be
+        # terminal or nonterminal
+        for i in items:
+            s = self.curs(i)
+            # cursor may be at the end of the prod
+            if s is not None and self.is_prod(s):
+                c.add(s)
 
-id     = Token("id", r"[a-bA-B_][a-bA-B_0-9]+")
-plus   = Token("+", r"\+")
-times  = Token("*", r"\*")
-lparen = Token("(", r"\(")
-rparen = Token(")", r"\)")
+        dirty = True
+        while dirty:
+            # save the initial length
+            n = len(c)
+            # iterate each symbol in the set
+            for s in c:
+                if self.is_prod(s):
+                    # if its a production,
+                    # add the first sub-production
+                    # of each rule
+                    for r in self.rules(s):
+                        if self.is_prod(r.rhs[0]) and r.rhs[0] not in c:
+                            c.add(r.rhs[0])
+                            iset.add(self.nonkernel(r))
 
-E = Production("E")
-T = Production("T")
-F = Production("F")
+            # update the dirty bit to reflect
+            # if anything was added
+            dirty = n != len(c)
 
-E.rules([
-  [E, plus, T],
-  [T],
-])
+        return iset
 
-T.rules([
-  [T, times, F],
-  [F],
-])
+    def parser(self, prog):
+        # generate G'
+        Goal = g.prod("Goal")
+        self.add_rule(Goal, [prog])
 
-F.rules([
-  [lparen, E, rparen],
-  [id],
-])
+        # create i0
+        i0 = self.Item([prog], 0)
+        c = self.closure([i0])
+        c.add(Goal)
 
-g = Parser(E)
-print(g.first())
+        dirty = True
+        while dirty:
+            # iterate each item in the closure
+            for lhs in c:
+                # each rule is a nonkernel item
+                # i.e. cursor is at 0
+                for r in self.rules(lhs):
+                    i = self.nonkernel(r)
 
-for x in g.closure({Item(g._goal, 0)}):
-    print(g.itemstr(x))
 
-print()
+        print(c)
 
-for x in g.closure({Item(g._goal, 1)}):
-    print(g.itemstr(x))
+g = Grammar()
+
+# num = g.add_tok("num", r"[0-9]+")
+# plus = g.add_tok("'+'", r"\+")
+# lparen = g.add_tok("'('", r"\(")
+# rparen = g.add_tok("')'", r"\)")
+
+# Expr = g.add_prod("Expr")
+# Factor = g.add_prod("Factor")
+
+# g.add_rule(Expr, [Factor])
+# g.add_rule(Expr, [lparen, Factor, rparen])
+# g.add_rule(Factor, [num])
+# g.add_rule(Factor, [plus, Factor])
+# g.add_rule(Factor, [Factor, plus, num])
+
+# Goal = g.add_prod("Goal")
+# g.add_rule(Goal, [Expr])
+
+# i = g.Item(g.rules(Goal)[0], 0)
+
+plus = g.add_tok("'+'", r"\+")
+times = g.add_tok("'*'", r"\*")
+lparen = g.add_tok("'('", r"\(")
+rparen = g.add_tok("')'", r"\)")
+id = g.add_tok("id", "[a-zA-Z_][a-zA-Z_0-9]*")
+
+E = g.add_prod("E")
+T = g.add_prod("T")
+F = g.add_prod("F")
+
+g.add_rule(E, [E, plus, T])
+g.add_rule(E, [T])
+
+g.add_rule(T, [T, times, F])
+g.add_rule(T, [F])
+
+g.add_rule(F, [lparen, E, rparen])
+g.add_rule(F, [id])
+
+Goal = g.add_prod("Goal")
+g.add_rule(Goal, [E])
+
+i0 = [
+    g.Item(g.rules(Goal)[0], 0)
+]
+
+i1 = [
+    g.Item(g.rules(Goal)[0], 1),
+    g.Item(g.rules(E)[0], 1)
+]
+
+i2 = [
+    g.Item(g.rules(E)[1], 1),
+    g.Item(g.rules(T)[0], 1),
+]
+
+i3 = [
+    g.Item(g.rules(T)[1], 1),
+]
+
+i4 = [
+    g.Item(g.rules(F)[0], 1),
+]
+
+i5 = [
+    g.Item(g.rules(F)[1], 1),
+]
+
+i6 = [
+    g.Item(g.rules(E)[0], 2),
+]
+
+i7 = [
+    g.Item(g.rules(T)[0], 2),
+]
+
+i8 = [
+    g.Item(g.rules(E)[0], 1),
+    g.Item(g.rules(F)[0], 2),
+]
+
+i9 = [
+    g.Item(g.rules(E)[0], 3),
+    g.Item(g.rules(T)[0], 1),
+]
+
+i10 = [
+    g.Item(g.rules(T)[0], 3),
+]
+
+i11 = [
+    g.Item(g.rules(F)[0], 3),
+]

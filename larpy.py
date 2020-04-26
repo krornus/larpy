@@ -202,59 +202,59 @@ class Grammar:
         # where each associated nonkernel item
         # is in the closure
         c = intset(len(self._symbols))
-        iset = set(items)
-
-        # first add each symbol P s.t. A -> a.Px
-        # pointed to by each item i. P may be
-        # terminal or nonterminal
-        for i in items:
-            s = self.curs(i)
-            # cursor may be at the end of the prod
-            if s is not None and self.is_prod(s):
-                c.add(s)
+        iset = set((x for x in items))
 
         dirty = True
         while dirty:
             # save the initial length
             n = len(c)
-            # iterate each symbol in the set
-            for s in c:
-                if self.is_prod(s):
-                    # if its a production,
-                    # add the first sub-production
-                    # of each rule
+            # get each item in the set
+            for i in list(iset):
+                # get the symbol pointed to by the item in the rhs
+                s = self.curs(i)
+                if s is not None and self.is_prod(s) and s not in c:
+                    # if its a new production, add each rule of the symbol
+                    # as a nonkernel item
                     for r in self.rules(s):
-                        if self.is_prod(r.rhs[0]) and r.rhs[0] not in c:
-                            c.add(r.rhs[0])
-                            iset.add(self.nonkernel(r))
+                        # add the new item to the itemset,
+                        # mark it as done
+                        c.add(s)
+                        iset.add(self.nonkernel(r))
 
             # update the dirty bit to reflect
             # if anything was added
             dirty = n != len(c)
 
-        return iset
+        return frozenset(iset)
+
+    def goto(self, items, sym):
+        fwd = set()
+        for i in items:
+            if self.curs(i) == sym:
+                fwd.add(self.Item(i.rule, i.cursor + 1))
+        return self.closure(fwd)
 
     def parser(self, prog):
         # generate G'
-        Goal = g.prod("Goal")
+        Goal = g.add_prod("S'")
         self.add_rule(Goal, [prog])
 
         # create i0
-        i0 = self.Item([prog], 0)
-        c = self.closure([i0])
-        c.add(Goal)
+        i0 = self.Item(self.rules(Goal)[0], 0)
+        c = {self.closure([i0])}
 
         dirty = True
         while dirty:
+            n = len(c)
             # iterate each item in the closure
-            for lhs in c:
-                # each rule is a nonkernel item
-                # i.e. cursor is at 0
-                for r in self.rules(lhs):
-                    i = self.nonkernel(r)
+            for items in list(c):
+                for s in range(len(self._symbols)):
+                    d = self.goto(items, s)
+                    if d and d not in c:
+                        c.add(d)
+            dirty = n != len(c)
 
-
-        print(c)
+        return c
 
 g = Grammar()
 
@@ -295,58 +295,3 @@ g.add_rule(T, [F])
 
 g.add_rule(F, [lparen, E, rparen])
 g.add_rule(F, [id])
-
-Goal = g.add_prod("Goal")
-g.add_rule(Goal, [E])
-
-i0 = [
-    g.Item(g.rules(Goal)[0], 0)
-]
-
-i1 = [
-    g.Item(g.rules(Goal)[0], 1),
-    g.Item(g.rules(E)[0], 1)
-]
-
-i2 = [
-    g.Item(g.rules(E)[1], 1),
-    g.Item(g.rules(T)[0], 1),
-]
-
-i3 = [
-    g.Item(g.rules(T)[1], 1),
-]
-
-i4 = [
-    g.Item(g.rules(F)[0], 1),
-]
-
-i5 = [
-    g.Item(g.rules(F)[1], 1),
-]
-
-i6 = [
-    g.Item(g.rules(E)[0], 2),
-]
-
-i7 = [
-    g.Item(g.rules(T)[0], 2),
-]
-
-i8 = [
-    g.Item(g.rules(E)[0], 1),
-    g.Item(g.rules(F)[0], 2),
-]
-
-i9 = [
-    g.Item(g.rules(E)[0], 3),
-    g.Item(g.rules(T)[0], 1),
-]
-
-i10 = [
-    g.Item(g.rules(T)[0], 3),
-]
-
-i11 = [
-    g.Item(g.rules(F)[0], 3),
-]

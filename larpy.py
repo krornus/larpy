@@ -1,9 +1,21 @@
 import re
 from collections import deque, namedtuple
+from array import array
+import functools
+import struct
+from copy import copy
+from enum import IntEnum
+
+def array(fmt, shape):
+    # make an n-D list of known shape in (hopefully) one allocation
+    nmemb = functools.reduce(lambda x,y: x*y, shape)
+    size = struct.calcsize(fmt)
+    ary = memoryview(bytearray(nmemb*size)).cast(fmt, shape=shape)
+    return ary.tolist()
 
 class intset(list):
     def __init__(self, len):
-        super(intset, self).__init__((False for _ in range(len)))
+        super(intset, self).__init__(array("?", [len]))
         self._len = 0
         self._cap = len
 
@@ -35,6 +47,13 @@ class intset(list):
 
     def __repr__(self):
         return f"{{{', '.join(str(x) for x in iter(self))}}}"
+
+class Lookup(IntEnum):
+    GOTO = 0
+    SHIFT = 1
+    REDUCE = 2
+    ACCEPT = 3
+    ERROR = 4
 
 class first(list):
     def __init__(self, len):
@@ -68,7 +87,7 @@ class Grammar:
     def __init__(self):
         self._eps = 0
         self._tokens = [True]
-        self._symbols = [self.Token("EPSILON","")]
+        self._symbols = [self.Token("EPSILON", re.compile(""))]
         self._rules = [None]
         self._first = None
 
@@ -115,11 +134,17 @@ class Grammar:
         except IndexError:
             raise ValueError("Missing symbol")
 
+    def __len__(self):
+        return len(self._symbols)
+
     def is_prod(self, s):
         return s >= 0 and s < len(self._symbols) and not self._tokens[s]
 
     def is_tok(self, s):
         return s >= 0 and s < len(self._symbols) and self._tokens[s]
+
+    def symbols(self):
+        return (x for x in range(len(self)))
 
     def productions(self):
         return (x for x in range(len(self._symbols)) if self.is_prod(x))
@@ -144,8 +169,24 @@ class Grammar:
         rrhs = " ".join(x for x in rhs[i.cursor:])
         return f"{lhs} -> {lrhs} . {rrhs}"
 
-    def _partial_first(self, f, p):
+    def parser(self, prog):
+        return Parser(self, prog)
 
+class Parser:
+    # TODO: move first/goto/closure to this class from grammar
+    def __init__(self, grammar, goal):
+        # generate G'
+        augment = grammar.add_prod("Goal'")
+        grammar.add_rule(augment, [goal])
+        # create i0
+        i0 = grammar.Item(grammar.rules(augment)[0], 0)
+        # calculate the gotos and the canonical itemset for i0
+        self.g = grammar
+        self._items, self._goto = self.canonical(i0)
+        self._first = None
+        self._table = ParsingTable(self._items, self._goto, g.tokens(), g.productions())
+
+    def _partial_first(self, f, p):
         # first deal with terminals
         for r in self.rules(p):
             # if the rule is of the form X: epsilon
@@ -194,14 +235,14 @@ class Grammar:
             return i.rule.rhs[i.cursor]
 
     def nonkernel(self, r):
-        return self.Item(r, cursor=0)
+        return self.g.Item(r, cursor=0)
 
     def closure(self, items):
         # intset of items. each thing in this
         # set represents the lhs of a production
         # where each associated nonkernel item
         # is in the closure
-        c = intset(len(self._symbols))
+        c = intset(len(self.g))
         iset = set((x for x in items))
 
         dirty = True
@@ -212,10 +253,10 @@ class Grammar:
             for i in list(iset):
                 # get the symbol pointed to by the item in the rhs
                 s = self.curs(i)
-                if s is not None and self.is_prod(s) and s not in c:
+                if s is not None and self.g.is_prod(s) and s not in c:
                     # if its a new production, add each rule of the symbol
                     # as a nonkernel item
-                    for r in self.rules(s):
+                    for r in self.g.rules(s):
                         # add the new item to the itemset,
                         # mark it as done
                         c.add(s)
@@ -231,30 +272,54 @@ class Grammar:
         fwd = set()
         for i in items:
             if self.curs(i) == sym:
-                fwd.add(self.Item(i.rule, i.cursor + 1))
+                fwd.add(self.g.Item(i.rule, i.cursor + 1))
         return self.closure(fwd)
 
-    def parser(self, prog):
-        # generate G'
-        Goal = g.add_prod("S'")
-        self.add_rule(Goal, [prog])
+    def _add_lookup(self, items, lookup, state, sym, trans):
+        if len(lookup) < len(items):
+            ary = array("I", [len(self.g)])
+            amt = len(items) - len(goto)
+            lookup.extend((copy(ary) for _ in range(amt)))
 
-        # create i0
-        i0 = self.Item(self.rules(Goal)[0], 0)
-        c = {self.closure([i0])}
+        if self.g.is_prod(sym):
+            lookup[state][sym] = GOTO, trans
+        elif:
+            lookup[state][sym] = GOTO, trans
+
+    def canonical(self, i):
+        # list of item sets
+        items = [self.closure([i])]
+        lookup = []
 
         dirty = True
         while dirty:
-            n = len(c)
-            # iterate each item in the closure
-            for items in list(c):
-                for s in range(len(self._symbols)):
-                    d = self.goto(items, s)
-                    if d and d not in c:
-                        c.add(d)
-            dirty = n != len(c)
+            n = len(items)
+            # iterate current set of items in the closure
+            # this means we have to copy the set
+            for x in range(n):
+                for s in self.g.symbols():
+                    # create the goto set
+                    d = self.goto(items[x], s)
+                    if d:
+                        try:
+                            j = items.index(d)
+                            self._add_lookup(items, lookup, x, s, j)
+                        except ValueError:
+                            items.append(d)
+                            self._add_lookup(items, lookup, x, s, len(items) - 1)
+                    else:
+                        self._add_lookup(items, lookup, x, s, -1)
+            dirty = n != len(items)
 
-        return c
+        return items, goto
+
+class ParsingTable:
+    def __init__(self, states, goto, tokens, productions):
+        self._states = list(states)
+        self._tokens = list(tokens)
+        self._productions = list(productions)
+        self._actions = array("I", [len(states), len(self._tokens) + 1])
+        self._goto = goto
 
 g = Grammar()
 
@@ -295,3 +360,5 @@ g.add_rule(T, [F])
 
 g.add_rule(F, [lparen, E, rparen])
 g.add_rule(F, [id])
+
+p = g.parser(E)

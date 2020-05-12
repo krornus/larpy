@@ -1,4 +1,5 @@
 import copy
+import enum
 import struct
 import functools
 from collections import deque
@@ -81,33 +82,6 @@ class Grammar:
         else:
             raise ValueError("Invalid production")
 
-class Item:
-    def __init__(self, parser, rule, cursor):
-        self.rule = tuple((rule[0], tuple(rule[1])))
-        self.cursor = cursor
-
-        lhs = parser.name(rule[0])
-        rhs = [parser.name(x) for x in rule[1]]
-        lrhs = " ".join(x for x in rhs[:cursor])
-        rrhs = " ".join(x for x in rhs[cursor:])
-        self.description = f"{lhs} -> {lrhs} . {rrhs}"
-
-    def sym(self):
-        if self.cursor >= 0 and self.cursor < len(self.rule[1]):
-            return self.rule[1][self.cursor]
-
-    def __hash__(self):
-        return hash((self.rule, self.cursor))
-
-    def __eq__(self, other):
-        return hash(self) == hash(other)
-
-    def __str__(self):
-        return self.description
-
-    def __repr__(self):
-        return f"<{self.description}>"
-
 class Parser:
     def __init__(self, grammar, goal):
         self._tokens = grammar._tokens
@@ -134,7 +108,10 @@ class Parser:
     def rules(self, lhs):
         if lhs < len(self._tokens):
             raise IndexError
-        return (self._rules[x][1] for x in self._lookup[lhs - len(self._tokens)])
+        return self._lookup[lhs - len(self._tokens)]
+
+    def rule(self, i):
+        return self._rules[i]
 
     @property
     def goal(self):
@@ -177,39 +154,33 @@ class Parser:
     def symbols(self):
         return range(self._productions)
 
-    def closure(self, items):
-        c = intset(len(self))
-        iset = set((x for x in items))
+class Item:
+    def __init__(self, parser, rule, cursor):
+        self.lhs, self.rhs = parser.rule(rule)
+        self.rule = rule
+        self.cursor = cursor
 
-        dirty = True
-        while dirty:
-            # save the initial length
-            n = len(c)
-            # get each item in the set
-            for i in list(iset):
-                # get the symbol pointed to by the item in the rhs
-                s = i.sym()
-                if s is not None and self.isprod(s) and s not in c:
-                    # if its a new production, add each rule of the symbol
-                    # as a nonkernel item
-                    for r in self.rules(s):
-                        # add the new item to the itemset,
-                        # mark it as done
-                        c.add(s)
-                        iset.add(Item(self, (s, r), 0))
+        lname = parser.name(self.lhs)
+        rnames = [parser.name(x) for x in self.rhs]
+        lrname = " ".join(x for x in rnames[:cursor])
+        rrname = " ".join(x for x in rnames[cursor:])
+        self.description = f"{lname} -> {lrname} . {rrname}"
 
-            # update the dirty bit to reflect
-            # if anything was added
-            dirty = n != len(c)
+    def sym(self):
+        if self.cursor >= 0 and self.cursor < len(self.rhs):
+            return self.rhs[self.cursor]
 
-        return frozenset(iset)
+    def __hash__(self):
+        return hash((self.rule, self.cursor))
 
-    def goto(self, items, sym):
-        fwd = set()
-        for i in items:
-            if i.sym() == sym:
-                fwd.add(Item(self, i.rule, i.cursor + 1))
-        return self.closure(fwd)
+    def __eq__(self, other):
+        return hash(self) == hash(other)
+
+    def __str__(self):
+        return self.description
+
+    def __repr__(self):
+        return f"<{self.description}>"
 
 # production table, either a list of FIRST or FOLLOW sets
 class SymbolLookup(list):
@@ -279,16 +250,18 @@ class First(SymbolLookup):
     def _partial(self, prsr, prod):
         added = False
         # first deal with terminals
-        for r in prsr.rules(prod):
+        for rndx in prsr.rules(prod):
+            r = prsr.rule(rndx)[1]
             # if the rule is of the form X: epsilon
-            a = r and all(i == prsr.epsilon for i in r)
+            a = all(i == prsr.epsilon for i in r)
             # if the rule is of the form X: t B where t is a token != epsilon
             b = prsr.isterm(r[0]) and r[0] != prsr.epsilon
             if a or b:
                 added |= bool(self[prod].add(r[0]))
 
         # now deal with productions
-        for r in prsr.rules(prod):
+        for rndx in prsr.rules(prod):
+            r = prsr.rule(rndx)[1]
             # loop productions until epsilon not in rp
             for rp in r:
                 if prsr.isprod(rp) and rp != prod:
@@ -350,8 +323,8 @@ class Follow(SymbolLookup):
         added = False
 
         # for each rule starting with prod
-        for r in prsr.rules(prod):
-            rhs = list(r)
+        for rndx in prsr.rules(prod):
+            rhs = prsr.rule(rndx)[1]
             # we want to track how far backward
             # into the rule epsilon is in the first sets.
             # as long as epsilon is in the first set
@@ -405,26 +378,66 @@ class Follow(SymbolLookup):
 
 class ItemSets:
     def __init__(self, parser):
-        r0 = (parser.goal, list(parser.rules(parser.goal))[0])
+        r0 = list(parser.rules(parser.goal))[0]
         i0 = Item(parser, r0, 0)
         # list of item sets
-        self._itemsets = [parser.closure([i0])]
+        self._itemsets = [self._closure(parser, [i0])]
         # lookup table for item sets
         self._lookup = []
         # load the items
         self._items(parser)
 
+    def goto(self, state, sym):
+        return self._lookup[state][sym]
+
+    def __getitem__(self, x):
+        return self._itemsets[x]
+
+    def _closure(self, parser, items):
+        c = intset(len(parser))
+        iset = set((x for x in items))
+
+        dirty = True
+        while dirty:
+            # save the initial length
+            n = len(c)
+            # get each item in the set
+            for i in list(iset):
+                # get the symbol pointed to by the item in the rhs
+                s = i.sym()
+                if s is not None and parser.isprod(s) and s not in c:
+                    # if its a new production, add each rule of the symbol
+                    # as a nonkernel item
+                    for r in parser.rules(s):
+                        # add the new item to the itemset,
+                        # mark it as done
+                        c.add(s)
+                        iset.add(Item(parser, r, 0))
+
+            # update the dirty bit to reflect
+            # if anything was added
+            dirty = n != len(c)
+
+        return tuple(iset)
+
+    def _goto(self, parser, items, sym):
+        fwd = set()
+        for i in items:
+            if i.sym() == sym:
+                fwd.add(Item(parser, i.rule, i.cursor + 1))
+        return self._closure(parser, fwd)
+
     def _items(self, parser):
-        breakpoint()
         dirty = True
         while dirty:
             n = len(self._itemsets)
             # iterate current set of items in the closure
-            # this means we have to copy the set
+            # using an index. we only append to the list,
+            # so this is safe to iterate
             for x in range(n):
                 for s in parser.symbols():
                     # create the goto set
-                    d = parser.goto(self._itemsets[x], s)
+                    d = self._goto(parser, self._itemsets[x], s)
                     if d:
                         try:
                             j = self._itemsets.index(d)
@@ -449,3 +462,105 @@ class ItemSets:
 
     def __len__(self):
         return len(self._itemsets)
+
+    def __iter__(self):
+        return iter(self._itemsets)
+
+class ActionEnum(enum.IntEnum):
+    ACCEPT = 0
+    REJECT = 1
+    SHIFT  = 2
+    REDUCE = 3
+
+class Action:
+    def __init__(self, act, *args):
+        self.action = ActionEnum(act)
+        if self.action == ActionEnum.ACCEPT:
+            if args:
+                raise ValueError("Action ACCEPT expected zero arguments")
+        elif self.action == ActionEnum.REJECT:
+            if args:
+                raise ValueError("Action REJECT expected zero arguments")
+        elif self.action == ActionEnum.SHIFT:
+            if len(args) != 1:
+                raise ValueError("Action SHIFT expected one argument")
+            (self.state,) = args
+        elif self.action == ActionEnum.REDUCE:
+            if len(args) != 1:
+                raise ValueError("Action REDUCE expected one argument")
+            (self.prod,) = args
+
+    def __str__(self):
+        if self.action == ActionEnum.ACCEPT:
+            return "acc"
+        elif self.action == ActionEnum.REJECT:
+            return ""
+        elif self.action == ActionEnum.SHIFT:
+            return f" s{self.state}"
+        elif self.action == ActionEnum.REDUCE:
+            return f" r{self.prod}"
+
+class ParsingTable:
+    def __init__(self, parser):
+        self._first = First(parser)
+        self._follow = Follow(parser, self._first)
+        self._items = ItemSets(parser)
+        self._parser = parser
+
+        self._actions = [
+                [Action(ActionEnum.REJECT) for _ in range(len(parser.tokens()))]
+                for _ in range(len(self._items))]
+
+        self._goto = [
+                ["" for _ in range(len(parser.productions()) - 1)]
+                for _ in range(len(self._items))]
+
+        minprod = len(parser.tokens())
+        for s in range(len(self._items)):
+            for p in parser.productions():
+                if p == parser.goal:
+                    continue
+                x = p - minprod
+                if self._items.goto(s, p) >= 0:
+                    self._goto[s][x] = self._items.goto(s, p)
+
+        self._populate(parser)
+
+    def _populate(self, parser):
+        for i, iset in enumerate(self._items):
+            for item in iset:
+                s = item.sym()
+                if s is not None:
+                    # terminal -- apply shift rule
+                    if parser.isterm(s):
+                        j = self._items.goto(i, s)
+                        self._actions[i][s] = Action(ActionEnum.SHIFT, j)
+                else:
+                    if item.lhs != parser.goal:
+                        # end of production, add follow set of the lhs
+                        # (not including S')
+                        last = item.rhs[-1]
+                        for a in self._follow(item.lhs):
+                            if self._actions[i][a].action != ActionEnum.REJECT:
+                                raise ValueError("Grammar is not SLR(1)")
+                            self._actions[i][a] = Action(ActionEnum.REDUCE, item.rule)
+                    else:
+                        if self._actions[i][parser.eof].action != ActionEnum.REJECT:
+                            raise ValueError("Grammar is not SLR(1)")
+                        self._actions[i][parser.eof] = Action(ActionEnum.ACCEPT)
+
+    def action(self, state, tok):
+        return self._actions[state][tok]
+
+    def goto(self, state, tok):
+        return self._goto[state][tok]
+
+    def actionstab(self):
+        import tabulate
+        toks = [self._parser.name(x) for x in self._parser.tokens()]
+        return tabulate.tabulate(self._actions, headers=toks)
+
+    def gototab(self):
+        import tabulate
+        prods = [self._parser.name(x) for x in self._parser.productions()]
+        return tabulate.tabulate(self._goto, headers=prods)

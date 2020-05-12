@@ -2,14 +2,15 @@ import sys
 sys.path.append("../")
 import lexer
 import grammar
+import pprint
 
 input = b"""
 """
 
 class Tok(lexer.TokenEnum):
-     PLUS   = 0
-     TIMES  = 1
-     ID     = 2
+     ID     = 0
+     PLUS   = 1
+     TIMES  = 2
      LPAREN = 3
      RPAREN = 4
 
@@ -36,3 +37,9 @@ g.add_rule(T, [F])
 
 g.add_rule(F, [Tok.LPAREN, E, Tok.RPAREN])
 g.add_rule(F, [Tok.ID])
+
+p = grammar.Parser(g, E)
+tab = grammar.ParsingTable(p)
+
+# for i,iset in enumerate(tab._items._itemsets):
+#     pprint.pprint((i, iset))

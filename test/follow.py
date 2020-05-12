@@ -5,5 +5,8 @@ import dragon
 import lrk
 
 p = lrk.g.parser(lrk.Expr)
-f = grammar.First(p)
-print(f[lrk.Expr])
+
+first = grammar.First(p)
+follow = grammar.Follow(p, first)
+
+print(follow(lrk.Expr))

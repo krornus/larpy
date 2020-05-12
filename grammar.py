@@ -81,6 +81,33 @@ class Grammar:
         else:
             raise ValueError("Invalid production")
 
+class Item:
+    def __init__(self, parser, rule, cursor):
+        self.rule = tuple((rule[0], tuple(rule[1])))
+        self.cursor = cursor
+
+        lhs = parser.name(rule[0])
+        rhs = [parser.name(x) for x in rule[1]]
+        lrhs = " ".join(x for x in rhs[:cursor])
+        rrhs = " ".join(x for x in rhs[cursor:])
+        self.description = f"{lhs} -> {lrhs} . {rrhs}"
+
+    def sym(self):
+        if self.cursor >= 0 and self.cursor < len(self.rule[1]):
+            return self.rule[1][self.cursor]
+
+    def __hash__(self):
+        return hash((self.rule, self.cursor))
+
+    def __eq__(self, other):
+        return hash(self) == hash(other)
+
+    def __str__(self):
+        return self.description
+
+    def __repr__(self):
+        return f"<{self.description}>"
+
 class Parser:
     def __init__(self, grammar, goal):
         self._tokens = grammar._tokens
@@ -100,7 +127,7 @@ class Parser:
         rid = len(self._rules)
         self._productions += 1
         self._lookup.append([rid])
-        self._names.append("Goal'")
+        self._names.append("S'")
         self._rules.append((pid, [goal]))
         return pid
 
@@ -176,6 +203,13 @@ class Parser:
             dirty = n != len(c)
 
         return frozenset(iset)
+
+    def goto(self, items, sym):
+        fwd = set()
+        for i in items:
+            if i.sym() == sym:
+                fwd.add(Item(self, i.rule, i.cursor + 1))
+        return self.closure(fwd)
 
 # production table, either a list of FIRST or FOLLOW sets
 class SymbolLookup(list):
@@ -369,24 +403,49 @@ class Follow(SymbolLookup):
                             added |= self[rhs[x]].add(fp)
         return added
 
-class Item:
-    def __init__(self, parser, rule, cursor):
-        self.rule = rule
-        self.cursor = cursor
+class ItemSets:
+    def __init__(self, parser):
+        r0 = (parser.goal, list(parser.rules(parser.goal))[0])
+        i0 = Item(parser, r0, 0)
+        # list of item sets
+        self._itemsets = [parser.closure([i0])]
+        # lookup table for item sets
+        self._lookup = []
+        # load the items
+        self._items(parser)
 
-        lhs = parser.name(rule[0])
-        rhs = [parser.name(x) for x in rule[1]]
-        lrhs = " ".join(x for x in rhs[:cursor])
-        rrhs = " ".join(x for x in rhs[cursor:])
+    def _items(self, parser):
+        breakpoint()
+        dirty = True
+        while dirty:
+            n = len(self._itemsets)
+            # iterate current set of items in the closure
+            # this means we have to copy the set
+            for x in range(n):
+                for s in parser.symbols():
+                    # create the goto set
+                    d = parser.goto(self._itemsets[x], s)
+                    if d:
+                        try:
+                            j = self._itemsets.index(d)
+                            self._add_lookup(parser, x, s, j)
+                        except ValueError:
+                            self._itemsets.append(d)
+                            self._add_lookup(parser, x, s, len(self._itemsets) - 1)
+                    else:
+                        self._add_lookup(parser, x, s, -1)
+            dirty = n != len(self._itemsets)
 
-        self.description = f"{lhs} -> {lrhs} . {rrhs}"
+    def _add_lookup(self, parser, state, sym, trans):
+        if len(self._lookup) < len(self._itemsets):
+            amt = len(self._itemsets) - len(self._lookup)
+            arys = (array("I", [len(parser)]) for _ in range(amt))
+            self._lookup.extend(arys)
 
-    def sym(self):
-        if self.cursor >= 0 and self.cursor < len(self.rule[1]):
-            return self.rule[1][self.cursor]
+        if parser.isprod(sym):
+            self._lookup[state][sym] = trans
+        else:
+            self._lookup[state][sym] = trans
 
-    def __str__(self):
-        return self.description
-
-    def __repr__(self):
-        return f"<{self.description}>"
+    def __len__(self):
+        return len(self._itemsets)

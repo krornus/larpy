@@ -488,7 +488,7 @@ class Action:
         elif self.action == ActionEnum.REDUCE:
             if len(args) != 1:
                 raise ValueError("Action REDUCE expected one argument")
-            (self.prod,) = args
+            (self.rule,) = args
 
     def __str__(self):
         if self.action == ActionEnum.ACCEPT:
@@ -498,7 +498,7 @@ class Action:
         elif self.action == ActionEnum.SHIFT:
             return f" s{self.state}"
         elif self.action == ActionEnum.REDUCE:
-            return f" r{self.prod}"
+            return f" r{self.rule}"
 
 class ParsingTable:
     def __init__(self, grammar):
@@ -515,12 +515,12 @@ class ParsingTable:
                 ["" for _ in range(len(grammar.productions()) - 1)]
                 for _ in range(len(self._items))]
 
-        minprod = len(grammar.tokens())
+        self._minprod = len(grammar.tokens())
         for s in range(len(self._items)):
             for p in grammar.productions():
                 if p == grammar.goal:
                     continue
-                x = p - minprod
+                x = p - self._minprod
                 if self._items.goto(s, p) >= 0:
                     self._goto[s][x] = self._items.goto(s, p)
 
@@ -552,8 +552,8 @@ class ParsingTable:
     def action(self, state, tok):
         return self._actions[state][tok]
 
-    def goto(self, state, tok):
-        return self._goto[state][tok]
+    def goto(self, state, prod):
+        return self._goto[state][prod - self._minprod]
 
     def actionstab(self):
         import tabulate
@@ -564,3 +564,50 @@ class ParsingTable:
         import tabulate
         prods = [self._grammar.name(x) for x in self._grammar.productions()]
         return tabulate.tabulate(self._goto, headers=prods)
+
+class Parser:
+    def __init__(self, lexer, grammar):
+        self._lexer = lexer
+        self._grammar = grammar
+        self._tab = ParsingTable(self._grammar)
+        self._stack = [0]
+
+    def parse(self):
+        tok, val = next(self._lexer)
+
+        while True:
+            # get the action for current state + token
+            state = self._peek()
+            act = self._tab.action(state, tok)
+
+            if act.action == ActionEnum.SHIFT:
+                # add next state to the stack
+                self._push(act.state)
+                # update the current token
+                tok, val = next(self._lexer)
+
+            elif act.action == ActionEnum.REDUCE:
+                # get the rule to reduce by and pop
+                # |rhs| off the stack
+                lhs, rhs = self._grammar.rule(act.rule)
+                self._pop(len(rhs))
+                # get new top of stack
+                top = self._peek()
+                # goto by lhs
+                goto = self._tab.goto(top, lhs)
+                assert(goto >= 0)
+                self._push(goto)
+
+            elif act.action == ActionEnum.ACCEPT:
+                break
+            else:
+                raise SyntaxError(f"Invalid syntax: unexpected {tok.name}")
+
+    def _push(self, state):
+        self._stack.append(state)
+
+    def _pop(self, n):
+        del self._stack[-n:]
+
+    def _peek(self):
+        return self._stack[-1]

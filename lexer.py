@@ -145,15 +145,11 @@ class Lexer:
 
         if ttok is not None:
             return ttok, tval
+        else:
+            return self._tokcls.EOF, None
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        if self._idx >= len(self._buf):
-            raise StopIteration
-        t = self.nexttok()
-        if t is not None:
-            return t
-        else:
-            raise StopIteration
+        return self.nexttok()

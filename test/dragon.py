@@ -5,6 +5,7 @@ import grammar
 import pprint
 
 input = b"""
+var1 + var2 * var3 * (var1 + var2)
 """
 
 class Tok(lexer.TokenEnum):
@@ -39,9 +40,5 @@ g.add_rule(F, [Tok.LPAREN, E, Tok.RPAREN])
 g.add_rule(F, [Tok.ID])
 
 g = g.build(E)
-
-tab = grammar.ParsingTable(g)
-
-
-# for i,iset in enumerate(tab._items._itemsets):
-#     pprint.pprint((i, iset))
+p = grammar.Parser(lex, g)
+p.parse()

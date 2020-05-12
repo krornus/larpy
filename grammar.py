@@ -55,7 +55,7 @@ class intset(list):
     def __repr__(self):
         return f"{{{', '.join(str(x) for x in iter(self))}}}"
 
-class Grammar:
+class GrammarBuilder:
     def __init__(self, tokens):
         self._tokens = tokens
         self._productions = len(self._tokens)
@@ -76,20 +76,20 @@ class Grammar:
         self._rules.append((rhs, lhs))
         self._lookup[rhs - len(self._tokens)].append(id)
 
-    def parser(self, prod):
+    def build(self, prod):
         if len(self._tokens) <= prod < self._productions:
-            return Parser(self, prod)
+            return Grammar(self, prod)
         else:
             raise ValueError("Invalid production")
 
-class Parser:
-    def __init__(self, grammar, goal):
-        self._tokens = grammar._tokens
-        self._productions = grammar._productions
+class Grammar:
+    def __init__(self, builder, goal):
+        self._tokens = builder._tokens
+        self._productions = builder._productions
 
-        self._names = copy.copy(grammar._names)
-        self._rules = copy.copy(grammar._rules)
-        self._lookup = copy.copy(grammar._lookup)
+        self._names = copy.copy(builder._names)
+        self._rules = copy.copy(builder._rules)
+        self._lookup = copy.copy(builder._lookup)
 
         self._goal = self._add_goal(goal)
 
@@ -155,13 +155,13 @@ class Parser:
         return range(self._productions)
 
 class Item:
-    def __init__(self, parser, rule, cursor):
-        self.lhs, self.rhs = parser.rule(rule)
+    def __init__(self, grammar, rule, cursor):
+        self.lhs, self.rhs = grammar.rule(rule)
         self.rule = rule
         self.cursor = cursor
 
-        lname = parser.name(self.lhs)
-        rnames = [parser.name(x) for x in self.rhs]
+        lname = grammar.name(self.lhs)
+        rnames = [grammar.name(x) for x in self.rhs]
         lrname = " ".join(x for x in rnames[:cursor])
         rrname = " ".join(x for x in rnames[cursor:])
         self.description = f"{lname} -> {lrname} . {rrname}"
@@ -184,21 +184,21 @@ class Item:
 
 # production table, either a list of FIRST or FOLLOW sets
 class SymbolLookup(list):
-    def __init__(self, parser, *args, **kwargs):
+    def __init__(self, grammar, *args, **kwargs):
         # initial max capacity/length
-        self._cap = len(parser)
+        self._cap = len(grammar)
         self._len = 0
 
         # load the initial list with the default values
-        values = (self._default(parser, x) for x in range(self._cap))
+        values = (self._default(grammar, x) for x in range(self._cap))
         super(SymbolLookup, self).__init__(values)
 
         # calculate the sets
         # for each production
-        self._populate(parser, *args, **kwargs)
+        self._populate(grammar, *args, **kwargs)
 
         # now make each set frozen (readonly)
-        for x in parser.productions():
+        for x in grammar.productions():
             self[x].freeze()
 
     def __contains__(self, x):
@@ -213,10 +213,10 @@ class SymbolLookup(list):
     def __call__(self, x):
         return super(SymbolLookup, self).__getitem__(x)
 
-    def _default(self, parser, sym):
+    def _default(self, grammar, sym):
         return None
 
-    def _populate(self, parser, *args, **kwargs):
+    def _populate(self, grammar, *args, **kwargs):
         # populate each production set as necessary
         raise NotImplementedError
 
@@ -377,15 +377,15 @@ class Follow(SymbolLookup):
         return added
 
 class ItemSets:
-    def __init__(self, parser):
-        r0 = list(parser.rules(parser.goal))[0]
-        i0 = Item(parser, r0, 0)
+    def __init__(self, grammar):
+        r0 = list(grammar.rules(grammar.goal))[0]
+        i0 = Item(grammar, r0, 0)
         # list of item sets
-        self._itemsets = [self._closure(parser, [i0])]
+        self._itemsets = [self._closure(grammar, [i0])]
         # lookup table for item sets
         self._lookup = []
         # load the items
-        self._items(parser)
+        self._items(grammar)
 
     def goto(self, state, sym):
         return self._lookup[state][sym]
@@ -393,8 +393,8 @@ class ItemSets:
     def __getitem__(self, x):
         return self._itemsets[x]
 
-    def _closure(self, parser, items):
-        c = intset(len(parser))
+    def _closure(self, grammar, items):
+        c = intset(len(grammar))
         iset = set((x for x in items))
 
         dirty = True
@@ -405,14 +405,14 @@ class ItemSets:
             for i in list(iset):
                 # get the symbol pointed to by the item in the rhs
                 s = i.sym()
-                if s is not None and parser.isprod(s) and s not in c:
+                if s is not None and grammar.isprod(s) and s not in c:
                     # if its a new production, add each rule of the symbol
                     # as a nonkernel item
-                    for r in parser.rules(s):
+                    for r in grammar.rules(s):
                         # add the new item to the itemset,
                         # mark it as done
                         c.add(s)
-                        iset.add(Item(parser, r, 0))
+                        iset.add(Item(grammar, r, 0))
 
             # update the dirty bit to reflect
             # if anything was added
@@ -420,14 +420,14 @@ class ItemSets:
 
         return tuple(iset)
 
-    def _goto(self, parser, items, sym):
+    def _goto(self, grammar, items, sym):
         fwd = set()
         for i in items:
             if i.sym() == sym:
-                fwd.add(Item(parser, i.rule, i.cursor + 1))
-        return self._closure(parser, fwd)
+                fwd.add(Item(grammar, i.rule, i.cursor + 1))
+        return self._closure(grammar, fwd)
 
-    def _items(self, parser):
+    def _items(self, grammar):
         dirty = True
         while dirty:
             n = len(self._itemsets)
@@ -435,27 +435,27 @@ class ItemSets:
             # using an index. we only append to the list,
             # so this is safe to iterate
             for x in range(n):
-                for s in parser.symbols():
+                for s in grammar.symbols():
                     # create the goto set
-                    d = self._goto(parser, self._itemsets[x], s)
+                    d = self._goto(grammar, self._itemsets[x], s)
                     if d:
                         try:
                             j = self._itemsets.index(d)
-                            self._add_lookup(parser, x, s, j)
+                            self._add_lookup(grammar, x, s, j)
                         except ValueError:
                             self._itemsets.append(d)
-                            self._add_lookup(parser, x, s, len(self._itemsets) - 1)
+                            self._add_lookup(grammar, x, s, len(self._itemsets) - 1)
                     else:
-                        self._add_lookup(parser, x, s, -1)
+                        self._add_lookup(grammar, x, s, -1)
             dirty = n != len(self._itemsets)
 
-    def _add_lookup(self, parser, state, sym, trans):
+    def _add_lookup(self, grammar, state, sym, trans):
         if len(self._lookup) < len(self._itemsets):
             amt = len(self._itemsets) - len(self._lookup)
-            arys = (array("I", [len(parser)]) for _ in range(amt))
+            arys = (array("I", [len(grammar)]) for _ in range(amt))
             self._lookup.extend(arys)
 
-        if parser.isprod(sym):
+        if grammar.isprod(sym):
             self._lookup[state][sym] = trans
         else:
             self._lookup[state][sym] = trans
@@ -501,42 +501,42 @@ class Action:
             return f" r{self.prod}"
 
 class ParsingTable:
-    def __init__(self, parser):
-        self._first = First(parser)
-        self._follow = Follow(parser, self._first)
-        self._items = ItemSets(parser)
-        self._parser = parser
+    def __init__(self, grammar):
+        self._first = First(grammar)
+        self._follow = Follow(grammar, self._first)
+        self._items = ItemSets(grammar)
+        self._grammar = grammar
 
         self._actions = [
-                [Action(ActionEnum.REJECT) for _ in range(len(parser.tokens()))]
+                [Action(ActionEnum.REJECT) for _ in range(len(grammar.tokens()))]
                 for _ in range(len(self._items))]
 
         self._goto = [
-                ["" for _ in range(len(parser.productions()) - 1)]
+                ["" for _ in range(len(grammar.productions()) - 1)]
                 for _ in range(len(self._items))]
 
-        minprod = len(parser.tokens())
+        minprod = len(grammar.tokens())
         for s in range(len(self._items)):
-            for p in parser.productions():
-                if p == parser.goal:
+            for p in grammar.productions():
+                if p == grammar.goal:
                     continue
                 x = p - minprod
                 if self._items.goto(s, p) >= 0:
                     self._goto[s][x] = self._items.goto(s, p)
 
-        self._populate(parser)
+        self._populate(grammar)
 
-    def _populate(self, parser):
+    def _populate(self, grammar):
         for i, iset in enumerate(self._items):
             for item in iset:
                 s = item.sym()
                 if s is not None:
                     # terminal -- apply shift rule
-                    if parser.isterm(s):
+                    if grammar.isterm(s):
                         j = self._items.goto(i, s)
                         self._actions[i][s] = Action(ActionEnum.SHIFT, j)
                 else:
-                    if item.lhs != parser.goal:
+                    if item.lhs != grammar.goal:
                         # end of production, add follow set of the lhs
                         # (not including S')
                         last = item.rhs[-1]
@@ -545,9 +545,9 @@ class ParsingTable:
                                 raise ValueError("Grammar is not SLR(1)")
                             self._actions[i][a] = Action(ActionEnum.REDUCE, item.rule)
                     else:
-                        if self._actions[i][parser.eof].action != ActionEnum.REJECT:
+                        if self._actions[i][grammar.eof].action != ActionEnum.REJECT:
                             raise ValueError("Grammar is not SLR(1)")
-                        self._actions[i][parser.eof] = Action(ActionEnum.ACCEPT)
+                        self._actions[i][grammar.eof] = Action(ActionEnum.ACCEPT)
 
     def action(self, state, tok):
         return self._actions[state][tok]
@@ -557,10 +557,10 @@ class ParsingTable:
 
     def actionstab(self):
         import tabulate
-        toks = [self._parser.name(x) for x in self._parser.tokens()]
+        toks = [self._grammar.name(x) for x in self._grammar.tokens()]
         return tabulate.tabulate(self._actions, headers=toks)
 
     def gototab(self):
         import tabulate
-        prods = [self._parser.name(x) for x in self._parser.productions()]
+        prods = [self._grammar.name(x) for x in self._grammar.productions()]
         return tabulate.tabulate(self._goto, headers=prods)

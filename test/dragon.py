@@ -23,7 +23,7 @@ lex.token(b"\*", Tok.TIMES)
 lex.token(b"\(", Tok.LPAREN)
 lex.token(b"\)", Tok.RPAREN)
 
-g = grammar.Grammar(Tok)
+g = grammar.GrammarBuilder(Tok)
 
 E = g.add_prod("E")
 T = g.add_prod("T")
@@ -38,8 +38,10 @@ g.add_rule(T, [F])
 g.add_rule(F, [Tok.LPAREN, E, Tok.RPAREN])
 g.add_rule(F, [Tok.ID])
 
-p = grammar.Parser(g, E)
-tab = grammar.ParsingTable(p)
+g = g.build(E)
+
+tab = grammar.ParsingTable(g)
+
 
 # for i,iset in enumerate(tab._items._itemsets):
 #     pprint.pprint((i, iset))

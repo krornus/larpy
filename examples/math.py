@@ -1,10 +1,9 @@
 import sys
-sys.path.append("../")
-
+sys.path.append("..")
 from grammar import Lexer, Grammar, Parser, rule
 
 input = b"""
-(1 + 2 * 3 * (1 + 2)) * 0
+(1 + 2 * 3 * (1 + 2)) * 2
 """
 
 class DragonGrammar(Grammar):
@@ -20,7 +19,7 @@ class DragonGrammar(Grammar):
 
     @rule(E, [E, PLUS, T])
     def add(self, e, p, t):
-        return (e or 0) + t
+        return e + t
 
     @rule(E, [T])
     def product(self, t):
@@ -36,7 +35,7 @@ class DragonGrammar(Grammar):
 
     @rule(F, [LPAREN, E, RPAREN])
     def pexpr(self, l, e, r):
-        return e or 0
+        return e
 
     @rule(F, [NUM])
     def num(self, n):
@@ -53,4 +52,9 @@ lex.token(b"\(", DragonGrammar.LPAREN)
 lex.token(b"\)", DragonGrammar.RPAREN)
 
 p = Parser(lex, g)
-print(p.parse())
+
+if __name__ == "__main__":
+    eq = input.decode().strip()
+    rv = p.parse()
+    assert(eval(eq) == rv)
+    print(f"{eq} = {rv}")

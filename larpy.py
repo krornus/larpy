@@ -89,17 +89,21 @@ class TokenMatcher:
                 return n, self._val
 
 class Lexer:
-    def __init__(self, grammar, buf):
+    def __init__(self, grammar):
         # for this prototype, we read
         # the entire buffer into memory
-        self._buf = memoryview(buf)
-        self._idx = 0
         self._tokens = []
         self._grammar = grammar
+        self._buf = None
+        self._idx = 0
 
     @property
     def buf(self):
         return self._buf[self._idx:]
+
+    def tokenize(self, buf):
+        self._buf = memoryview(buf)
+        self._idx = 0
 
     def token(self, pat, tok=None, val=None, lookahead=None):
         if tok is not None:
@@ -109,6 +113,9 @@ class Lexer:
         return tok
 
     def nexttok(self):
+        if self._buf is None:
+            raise ValueError("Lexer has no input to tokenize")
+
         ttok = None
         found = True
 
@@ -796,12 +803,14 @@ class ParsingTable:
 
 class Parser:
     def __init__(self, lexer, grammar):
-        self._lexer = lexer
         self._grammar = grammar
         self._tab = ParsingTable(self._grammar)
+        self._lexer = lexer
+
+    def parse(self, input):
+        self._lexer.tokenize(input)
         self._stack = [(0,None)]
 
-    def parse(self):
         tok, val = next(self._lexer)
 
         while True:

@@ -46,7 +46,7 @@ class MathGrammar(Grammar):
     def num(self, n):
         return n
 
-lex = Lexer(MathGrammar, input)
+lex = Lexer(MathGrammar)
 lex.token(b"\s+")
 lex.token(b"[0-9]+", MathGrammar.NUM, int)
 lex.token(b"\+", MathGrammar.PLUS)
@@ -54,12 +54,11 @@ lex.token(b"\*", MathGrammar.TIMES)
 lex.token(b"\(", MathGrammar.LPAREN)
 lex.token(b"\)", MathGrammar.RPAREN)
 
-
 g = MathGrammar()
 p = Parser(lex, g)
 
 if __name__ == "__main__":
     eq = input.decode().strip()
-    rv = p.parse()
+    rv = p.parse(input)
     assert(eval(eq) == rv)
     print(f"{eq} = {rv}")

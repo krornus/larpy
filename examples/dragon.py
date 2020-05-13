@@ -1,6 +1,5 @@
 import sys
 sys.path.append("../")
-import pprint
 
 from grammar import Lexer, Grammar, Parser, rule
 

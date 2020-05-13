@@ -1,6 +1,6 @@
 import sys
 sys.path.append("..")
-from grammar import Lexer, Grammar, Parser, rule
+from larpy import Lexer, Grammar, Parser, rule
 
 input = b"""
 (1 + 2 * 3 * (1 + 2)) * 2

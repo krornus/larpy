@@ -139,7 +139,6 @@ class Lexer:
     def __next__(self):
         return self.nexttok()
 
-
 class _GrammarBuilder:
     def __init__(self):
         self.symbols = 0
@@ -206,26 +205,47 @@ class GrammarMeta(type):
         tokend = builder.symbols
         prodstart = builder.symbols
 
+        goal = None
+
         # then each production
         for name, member in classdict.items():
-            if isinstance(member, _ProductionID):
+            ispid = isinstance(member, _ProductionID)
+            isgid = isinstance(member, _GoalID)
+
+            if ispid or isgid:
+                # add the production
                 id = builder.add_prod(name)
+
+                if isgid:
+                    if goal is not None:
+                        raise ValueError("Grammar cannot have multiple goals")
+                    else:
+                        goal = id
+
                 syms[member.id] = id
                 classdict[name] = id
                 pids.append(id)
 
+        if goal is not None:
+            # create an augmented grammar from the goal
+            id = builder.add_prod("S'")
+            classdict["_goal"] = id
+            builder.add_rule(id, [goal], lambda x: x)
+
+        # note production end point
         prodend = builder.symbols
 
         # now, add production rules for each _ProductionMethod
         for name, member in classdict.items():
-            if isinstance(member, rule):
-                # convert the member to a _ProductionMethod first
+            isrule = isinstance(member, rule)
+            ismeth = isinstance(member, _ProductionMethod)
+
+            # convert any rules to _ProductionMethods first
+            if isrule:
                 member = member(lambda *_: None)
-                lhs = syms[member.lhs.id]
-                rhs = [syms[x.id] for x in member.rhs]
-                builder.add_rule(lhs, rhs, member.fn)
-                classdict[name] = member.fn
-            elif isinstance(member, _ProductionMethod):
+
+            if isrule or ismeth:
+                # add the rule to the builder
                 lhs = syms[member.lhs.id]
                 rhs = [syms[x.id] for x in member.rhs]
                 builder.add_rule(lhs, rhs, member.fn)
@@ -263,6 +283,10 @@ class _TokenID(typing.NamedTuple):
 class _ProductionID(typing.NamedTuple):
     id: int
 
+# Fake ID that gets replaced in GrammarMeta
+class _GoalID(typing.NamedTuple):
+    id: int
+
 # Method wrapper to signify a decorated method for GrammarMeta
 class _ProductionMethod(typing.NamedTuple):
     fn: types.MethodType
@@ -296,68 +320,68 @@ class Grammar(metaclass=GrammarMeta):
         cls._sid += 1
         return _ProductionID(cls._sid)
 
-    def __init__(self, goal):
-        if not self.isprod(goal):
-            raise ValueError("Invalid production")
-        self._goal = self._add_goal(goal)
+    @classmethod
+    def newgoal(cls):
+        id = cls._sid
+        cls._sid += 1
+        return _GoalID(cls._sid)
 
-    # like add_prod/add_rule, but should only be called
-    # by __init__ once. converts the grammar into an
-    # augmented grammar with a start symbol S' -> S
-    def _add_goal(self, goal):
-        pid = self._prodend
-        rid = len(self._rules)
-
-        self._prodend += 1
-        self._lookup.append([rid])
-        self._names.append("S'")
-        self._rules.append((pid, [goal]))
-        self._actions.append(lambda x: x)
-
-        return pid
-
-    def rules(self, lhs):
-        if lhs < self._prodstart:
+    @classmethod
+    def rules(cls, lhs):
+        if lhs < cls._prodstart:
             raise IndexError
-        return self._lookup[lhs - self._prodstart]
+        return cls._lookup[lhs - cls._prodstart]
 
-    def action(self, rndx):
-        return self._actions[rndx]
+    @classmethod
+    def action(cls, rndx):
+        return cls._actions[rndx]
 
-    def rule(self, rndx):
-        return self._rules[rndx]
+    @classmethod
+    def rule(cls, rndx):
+        return cls._rules[rndx]
 
-    @property
-    def goal(self):
-        return self._goal
-
-    def isterm(self, id):
+    @classmethod
+    def isterm(cls, id):
         if type(id) != int:
             breakpoint()
-        if 0 <= id < self._prodstart:
+        if 0 <= id < cls._prodstart:
            return True
-        elif id < self._prodend:
+        elif id < cls._prodend:
             return False
         else:
+            breakpoint()
             raise IndexError
 
-    def isprod(self, id):
-        return not self.isterm(id)
+    @classmethod
+    def isprod(cls, id):
+        return not cls.isterm(id)
 
-    def name(self, id):
-        return self._names[id]
+    @classmethod
+    def name(cls, id):
+        return cls._names[id]
+
+    @classmethod
+    def productions(cls):
+        return range(cls._prodstart, cls._prodend)
+
+    @classmethod
+    def tokens(cls):
+        return range(cls._tokstart, cls._tokend)
+
+    @classmethod
+    def symbols(cls):
+        return range(cls._tokstart, cls._prodend)
+
+    @property
+    def goal(cls):
+        return cls._goal
+
+    def __init__(self):
+        if self.goal is None:
+            raise ValueError("Missing goal for grammar")
 
     def __len__(self):
-        return self._prodend
-
-    def productions(self):
-        return range(self._prodstart, self._prodend)
-
-    def tokens(self):
-        return range(self._tokstart, self._tokend)
-
-    def symbols(self):
-        return range(self._tokstart, self._prodend)
+        return self._prodend - self._tokstart
 
 class Item:
     def __init__(self, grammar, rule, cursor):

@@ -6,17 +6,22 @@ input = b"""
 (1 + 2 * 3 * (1 + 2)) * 2
 """
 
-class DragonGrammar(Grammar):
-    E = Grammar.newprod()
+class MathGrammar(Grammar):
+
+    # Target production
+    E = Grammar.newgoal()
+    # Other productions
     T = Grammar.newprod()
     F = Grammar.newprod()
 
+    # Tokens
     NUM    = Grammar.newtok()
     PLUS   = Grammar.newtok()
     TIMES  = Grammar.newtok()
     LPAREN = Grammar.newtok()
     RPAREN = Grammar.newtok()
 
+    # Rules
     @rule(E, [E, PLUS, T])
     def add(self, e, p, t):
         return e + t
@@ -41,16 +46,16 @@ class DragonGrammar(Grammar):
     def num(self, n):
         return n
 
-g = DragonGrammar(DragonGrammar.E)
-
-lex = Lexer(g, input)
+lex = Lexer(MathGrammar, input)
 lex.token(b"\s+")
-lex.token(b"[0-9]+", DragonGrammar.NUM, int)
-lex.token(b"\+", DragonGrammar.PLUS)
-lex.token(b"\*", DragonGrammar.TIMES)
-lex.token(b"\(", DragonGrammar.LPAREN)
-lex.token(b"\)", DragonGrammar.RPAREN)
+lex.token(b"[0-9]+", MathGrammar.NUM, int)
+lex.token(b"\+", MathGrammar.PLUS)
+lex.token(b"\*", MathGrammar.TIMES)
+lex.token(b"\(", MathGrammar.LPAREN)
+lex.token(b"\)", MathGrammar.RPAREN)
 
+
+g = MathGrammar()
 p = Parser(lex, g)
 
 if __name__ == "__main__":

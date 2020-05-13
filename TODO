@@ -1,0 +1,4 @@
+- Add a README
+- Stop using python's re
+  - Generate transition tables for token set from regex
+  - Read input in constant sized chunks

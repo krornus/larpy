@@ -1,8 +1,19 @@
-import copy
 import enum
-import struct
 import functools
+import re
+import struct
+import types
+import typing
 from collections import deque
+
+class LexerError(ValueError):
+    """Generic lexer error"""
+
+class UnexpectedCharacter(ValueError):
+    """Unexpected character in input"""
+
+class ParsingError(SyntaxError):
+    """Generic parsing error"""
 
 def array(fmt, shape):
     # make an n-D list of known shape in (hopefully) one allocation
@@ -55,80 +66,277 @@ class intset(list):
     def __repr__(self):
         return f"{{{', '.join(str(x) for x in iter(self))}}}"
 
-class GrammarBuilder:
-    def __init__(self, tokens):
-        self._tokens = tokens
-        self._productions = len(self._tokens)
+class TokenMatcher:
+    def __init__(self, pat, tok=None, val=None, lookahead=None):
+        self._creg = re.compile(pat)
+        if self._creg.match(b""):
+            raise ValueError("Token regex may not match empty string")
+        self._val = val
+        self._tok = tok
+        self._lookahead = lookahead
 
-        self._names = []
-        self._rules = []
-        self._lookup = []
+    @property
+    def ident(self):
+        return self._tok
 
-    def add_prod(self, name):
-        id = self._productions
-        self._productions += 1
-        self._lookup.append([])
-        self._names.append(name)
+    def match(self, stream):
+        m = self._creg.match(stream)
+        if m and (self._lookahead is None or self._lookahead.match(stream)):
+            n = m.end() - m.start()
+            if callable(self._val):
+                return n, self._val(m.group(0))
+            else:
+                return n, self._val
+
+class Lexer:
+    def __init__(self, grammar, buf):
+        # for this prototype, we read
+        # the entire buffer into memory
+        self._buf = memoryview(buf)
+        self._idx = 0
+        self._tokens = []
+        self._grammar = grammar
+
+    @property
+    def buf(self):
+        return self._buf[self._idx:]
+
+    def token(self, pat, tok=None, val=None, lookahead=None):
+        if tok is not None:
+            if not self._grammar.isterm(tok):
+                raise ValueError("Invalid token")
+        self._tokens.append(TokenMatcher(pat, tok, val, lookahead))
+        return tok
+
+    def nexttok(self):
+        ttok = None
+        found = True
+
+        while self.buf and found and ttok is None:
+            tlen = 0
+            tval = None
+            found = False
+            for tok in self._tokens:
+                m = tok.match(self.buf)
+                if m:
+                    if m[0] > tlen or not found:
+                        found = True
+                        tlen, tval = m
+                        ttok = tok.ident
+            if not found:
+                raise UnexpectedCharacter(chr(self.buf[0]), self._idx)
+            if tlen:
+                self._idx += tlen
+
+        if ttok is not None:
+            return ttok, tval
+        else:
+            return self._grammar.EOF, None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.nexttok()
+
+
+class _GrammarBuilder:
+    def __init__(self):
+        self.symbols = 0
+        self.productions = None
+
+        self.names = []
+        self.lookup = []
+        self.rules = []
+        self.actions = []
+
+    def add_tok(self, name):
+        # all tokens must be added first
+        assert(self.productions is None)
+
+        id = self.symbols
+        self.symbols += 1
+        self.names.append(name)
         return id
 
-    def add_rule(self, rhs, lhs):
-        id = len(self._rules)
-        self._rules.append((rhs, lhs))
-        self._lookup[rhs - len(self._tokens)].append(id)
 
-    def build(self, prod):
-        if len(self._tokens) <= prod < self._productions:
-            return Grammar(self, prod)
-        else:
+    def add_prod(self, name):
+        if self.productions is None:
+            self.productions = self.symbols
+
+        id = self.symbols
+        self.symbols += 1
+        self.lookup.append([])
+        self.names.append(name)
+        return id
+
+    def add_rule(self, rhs, lhs, action):
+        # productions must be added first
+        assert(self.productions is not None)
+
+        id = len(self.rules)
+        self.rules.append((rhs, lhs))
+        self.actions.append(action)
+        self.lookup[rhs - self.productions].append(id)
+
+class GrammarMeta(type):
+    def __new__(cls, classname, bases, classdict, **kwargs):
+
+        # XXX: Not sure if its faster to loop through
+        # the whole list every time (tok, prod, rules)
+        # or to seperate everything into lists (allocations)
+        # then iter each list. both ways would be O(N).
+        # Not going to worry about it until its noticable.
+        builder = _GrammarBuilder()
+        syms = dict()
+        pids = list()
+
+        tokstart = builder.symbols
+
+        # first add each token
+        for name, member in classdict.items():
+            if isinstance(member, _TokenID):
+                id = builder.add_tok(name)
+                syms[member.id] = id
+                classdict[name] = id
+
+        classdict["EOF"] = builder.add_tok("EOF")
+        classdict["EPSILON"] = builder.add_tok("EPSILON")
+
+        tokend = builder.symbols
+        prodstart = builder.symbols
+
+        # then each production
+        for name, member in classdict.items():
+            if isinstance(member, _ProductionID):
+                id = builder.add_prod(name)
+                syms[member.id] = id
+                classdict[name] = id
+                pids.append(id)
+
+        prodend = builder.symbols
+
+        # now, add production rules for each _ProductionMethod
+        for name, member in classdict.items():
+            if isinstance(member, rule):
+                # convert the member to a _ProductionMethod first
+                member = member(lambda *_: None)
+                lhs = syms[member.lhs.id]
+                rhs = [syms[x.id] for x in member.rhs]
+                builder.add_rule(lhs, rhs, member.fn)
+                classdict[name] = member.fn
+            elif isinstance(member, _ProductionMethod):
+                lhs = syms[member.lhs.id]
+                rhs = [syms[x.id] for x in member.rhs]
+                builder.add_rule(lhs, rhs, member.fn)
+                classdict[name] = member.fn
+
+        # now ensure no empty Productions exist
+        for id in pids:
+            if not builder.lookup[id - prodstart]:
+                raise ValueError(f"Empty production: {builder.names[id]}")
+
+        # now add the builder lists to the new class
+        # this is not perfect -- these lists are still
+        # mutable, but we have the only reference to them
+        # due to the builder reference being dropped after
+        # this function. it would be nice to have them
+        # as immutable without copying them to tuples
+        # or something, but at a certain point, this
+        # is python
+        classdict["_names"] = builder.names
+        classdict["_rules"] = builder.rules
+        classdict["_lookup"] = builder.lookup
+        classdict["_actions"] = builder.actions
+        classdict["_tokstart"] = tokstart
+        classdict["_tokend"] = tokend
+        classdict["_prodstart"] = prodstart
+        classdict["_prodend"] = prodend
+
+        return type.__new__(cls, classname, bases, classdict)
+
+# Fake ID that gets replaced in GrammarMeta
+class _TokenID(typing.NamedTuple):
+    id: int
+
+# Fake ID that gets replaced in GrammarMeta
+class _ProductionID(typing.NamedTuple):
+    id: int
+
+# Method wrapper to signify a decorated method for GrammarMeta
+class _ProductionMethod(typing.NamedTuple):
+    fn: types.MethodType
+    lhs: _ProductionID
+    rhs: typing.Sequence[_ProductionID]
+
+# adds a new production to the grammar. takes two arguments:
+#   lhs: the left hand side of the production, a production id
+#   rhs: the right hand side, a list of production and token ids
+#
+# may be used as a decorator or the return value may be assigned
+# as a class attribute
+class rule:
+    def __init__(self, lhs, rhs):
+        self.lhs, self.rhs = lhs, rhs
+    def __call__(self, fn):
+        return _ProductionMethod(fn, self.lhs, self.rhs)
+
+class Grammar(metaclass=GrammarMeta):
+    _sid = 0
+
+    @classmethod
+    def newtok(cls):
+        id = cls._sid
+        cls._sid += 1
+        return _TokenID(cls._sid)
+
+    @classmethod
+    def newprod(cls):
+        id = cls._sid
+        cls._sid += 1
+        return _ProductionID(cls._sid)
+
+    def __init__(self, goal):
+        if not self.isprod(goal):
             raise ValueError("Invalid production")
-
-class Grammar:
-    def __init__(self, builder, goal):
-        self._tokens = builder._tokens
-        self._productions = builder._productions
-
-        self._names = copy.copy(builder._names)
-        self._rules = copy.copy(builder._rules)
-        self._lookup = copy.copy(builder._lookup)
-
         self._goal = self._add_goal(goal)
 
     # like add_prod/add_rule, but should only be called
     # by __init__ once. converts the grammar into an
     # augmented grammar with a start symbol S' -> S
     def _add_goal(self, goal):
-        pid = self._productions
+        pid = self._prodend
         rid = len(self._rules)
-        self._productions += 1
+
+        self._prodend += 1
         self._lookup.append([rid])
         self._names.append("S'")
         self._rules.append((pid, [goal]))
+        self._actions.append(lambda x: x)
+
         return pid
 
     def rules(self, lhs):
-        if lhs < len(self._tokens):
+        if lhs < self._prodstart:
             raise IndexError
-        return self._lookup[lhs - len(self._tokens)]
+        return self._lookup[lhs - self._prodstart]
 
-    def rule(self, i):
-        return self._rules[i]
+    def action(self, rndx):
+        return self._actions[rndx]
+
+    def rule(self, rndx):
+        return self._rules[rndx]
 
     @property
     def goal(self):
         return self._goal
 
-    @property
-    def epsilon(self):
-        return self._tokens.EPSILON
-
-    @property
-    def eof(self):
-        return self._tokens.EOF
-
     def isterm(self, id):
-        if id < len(self._tokens):
+        if type(id) != int:
+            breakpoint()
+        if 0 <= id < self._prodstart:
            return True
-        elif id < self._productions:
+        elif id < self._prodend:
             return False
         else:
             raise IndexError
@@ -137,22 +345,19 @@ class Grammar:
         return not self.isterm(id)
 
     def name(self, id):
-        if self.isterm(id):
-            return self._tokens(id).name
-        else:
-            return self._names[id - len(self._tokens)]
+        return self._names[id]
 
     def __len__(self):
-        return self._productions
+        return self._prodend
 
     def productions(self):
-        return range(len(self._tokens), self._productions)
+        return range(self._prodstart, self._prodend)
 
     def tokens(self):
-        return range(len(self._tokens))
+        return range(self._tokstart, self._tokend)
 
     def symbols(self):
-        return range(self._productions)
+        return range(self._tokstart, self._prodend)
 
 class Item:
     def __init__(self, grammar, rule, cursor):
@@ -252,40 +457,40 @@ class First(SymbolLookup):
         # first deal with terminals
         for rndx in prsr.rules(prod):
             r = prsr.rule(rndx)[1]
-            # if the rule is of the form X: epsilon
-            a = all(i == prsr.epsilon for i in r)
-            # if the rule is of the form X: t B where t is a token != epsilon
-            b = prsr.isterm(r[0]) and r[0] != prsr.epsilon
+            # if the rule is of the form X: EPSILON
+            a = all(i == prsr.EPSILON for i in r)
+            # if the rule is of the form X: t B where t is a token != EPSILON
+            b = prsr.isterm(r[0]) and r[0] != prsr.EPSILON
             if a or b:
                 added |= bool(self[prod].add(r[0]))
 
         # now deal with productions
         for rndx in prsr.rules(prod):
             r = prsr.rule(rndx)[1]
-            # loop productions until epsilon not in rp
+            # loop productions until EPSILON not in rp
             for rp in r:
                 if prsr.isprod(rp) and rp != prod:
                     # add all values from first(rp)
-                    # that arent epsilon
+                    # that arent EPSILON
                     for s in self[rp]:
-                        # dont add epsilon here,
-                        # only if all rp have epsilon.
-                        if s != prsr.epsilon:
+                        # dont add EPSILON here,
+                        # only if all rp have EPSILON.
+                        if s != prsr.EPSILON:
                             added |= bool(self[prod].add(s))
 
                 # add each nonterminal's first set to
-                # prod's first as long as epsilon is in
+                # prod's first as long as EPSILON is in
                 # the nonterminal's first set. we break
-                # when we have used all leading epsilons
-                if (prsr.isterm(rp) and rp != prsr.epsilon) or prsr.epsilon not in self[rp]:
+                # when we have used all leading EPSILONs
+                if (prsr.isterm(rp) and rp != prsr.EPSILON) or prsr.EPSILON not in self[rp]:
                     break
             else:
-                # for/else: this only triggers if epsilon
+                # for/else: this only triggers if EPSILON
                 # was in every rp (break was never hit)
                 # this means that every production in r
-                # had epsilon in its first set, implying
-                # this also has epsilon in its first set
-                added |= bool(self[prod].add(prsr.epsilon))
+                # had EPSILON in its first set, implying
+                # this also has EPSILON in its first set
+                added |= bool(self[prod].add(prsr.EPSILON))
 
         return added
 
@@ -304,7 +509,7 @@ class Follow(SymbolLookup):
             return intset(self._cap)
 
     def _populate(self, prsr, first):
-        self[prsr.goal].add(prsr.eof)
+        self[prsr.goal].add(prsr.EOF)
 
         # add all productions to queue
         q = deque(prsr.productions())
@@ -326,8 +531,8 @@ class Follow(SymbolLookup):
         for rndx in prsr.rules(prod):
             rhs = prsr.rule(rndx)[1]
             # we want to track how far backward
-            # into the rule epsilon is in the first sets.
-            # as long as epsilon is in the first set
+            # into the rule EPSILON is in the first sets.
+            # as long as EPSILON is in the first set
             # for the current production and all future
             # productions in the rule, then we need to add
             # the follow of the lhs to the follow of the
@@ -336,43 +541,43 @@ class Follow(SymbolLookup):
             # e.g.
             #
             # A -> BCDE
-            # where epsilon in FIRST(D) and FIRST(E),
+            # where EPSILON in FIRST(D) and FIRST(E),
             # then FOLLOW(C) has FOLLOW(A)
             #
-            # Note: the epsilon flag should always be true
+            # Note: the EPSILON flag should always be true
             # for E, because its the end of the rule.
-            # epsilon may or may not be in FOLLOW(E) in
+            # EPSILON may or may not be in FOLLOW(E) in
             # this example
             #
             # Also note: EPSILON is never added to a FOLLOW
             # set.
             eflag = True
 
-            # iterate backwards so we have an epsilon flag
+            # iterate backwards so we have an EPSILON flag
             for x in reversed(range(len(rhs))):
                 if prsr.isterm(rhs[x]):
-                    eflag = rhs[x] == prsr.epsilon
+                    eflag = rhs[x] == prsr.EPSILON
                     # FOLLOW is only for non-terminals
                     # add nothing
                     continue
                 elif eflag:
-                    # update epsilon flag for next iter
-                    eflag = prsr.epsilon in first[rhs[x]]
+                    # update EPSILON flag for next iter
+                    eflag = prsr.EPSILON in first[rhs[x]]
                     # Add FOLLOW(prod) - EPSILON to FOLLOW(rhs[x])
                     for sp in self[prod]:
-                        if sp != prsr.epsilon:
+                        if sp != prsr.EPSILON:
                             added |= self[rhs[x]].add(sp)
 
                 # at this point, we are either mid rule
                 # a<B>c, or at the end of the rule (ab<C>)
                 # if we are at the end of the rule, we're done.
                 # otherwise, everything in FIRST(rhs[x+1]) is
-                # placed into FOLLOW(rhs[x]) except epsilon
+                # placed into FOLLOW(rhs[x]) except EPSILON
                 if x < len(rhs) - 1:
                     # case a<B>X
                     # add first(X)) - EPSILON to FOLLOW(B)
                     for fp in first[rhs[x+1]]:
-                        if fp != prsr.epsilon:
+                        if fp != prsr.EPSILON:
                             added |= self[rhs[x]].add(fp)
         return added
 
@@ -545,9 +750,9 @@ class ParsingTable:
                                 raise ValueError("Grammar is not SLR(1)")
                             self._actions[i][a] = Action(ActionEnum.REDUCE, item.rule)
                     else:
-                        if self._actions[i][grammar.eof].action != ActionEnum.REJECT:
+                        if self._actions[i][grammar.EOF].action != ActionEnum.REJECT:
                             raise ValueError("Grammar is not SLR(1)")
-                        self._actions[i][grammar.eof] = Action(ActionEnum.ACCEPT)
+                        self._actions[i][grammar.EOF] = Action(ActionEnum.ACCEPT)
 
     def action(self, state, tok):
         return self._actions[state][tok]
@@ -570,7 +775,7 @@ class Parser:
         self._lexer = lexer
         self._grammar = grammar
         self._tab = ParsingTable(self._grammar)
-        self._stack = [0]
+        self._stack = [(0,None)]
 
     def parse(self):
         tok, val = next(self._lexer)
@@ -582,7 +787,7 @@ class Parser:
 
             if act.action == ActionEnum.SHIFT:
                 # add next state to the stack
-                self._push(act.state)
+                self._push((act.state, val))
                 # update the current token
                 tok, val = next(self._lexer)
 
@@ -590,24 +795,26 @@ class Parser:
                 # get the rule to reduce by and pop
                 # |rhs| off the stack
                 lhs, rhs = self._grammar.rule(act.rule)
-                self._pop(len(rhs))
+                args = self._pop(len(rhs))
                 # get new top of stack
                 top = self._peek()
                 # goto by lhs
                 goto = self._tab.goto(top, lhs)
                 assert(goto >= 0)
-                self._push(goto)
+                # call the associated action
+                rv = self._grammar.action(act.rule)(self._grammar, *args)
+                self._push((goto, rv))
 
             elif act.action == ActionEnum.ACCEPT:
-                break
+                return self._pop()[0]
             else:
                 raise SyntaxError(f"Invalid syntax: unexpected {tok.name}")
 
     def _push(self, state):
         self._stack.append(state)
 
-    def _pop(self, n):
-        del self._stack[-n:]
+    def _pop(self, n=1):
+        return [self._stack.pop()[1] for _ in range(n)]
 
     def _peek(self):
-        return self._stack[-1]
+        return self._stack[-1][0]
